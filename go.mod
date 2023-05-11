@@ -92,6 +92,8 @@ require (
 	gopkg.in/ini.v1 v1.67.0 // indirect
 )
 
+require github.com/freddierice/go-losetup v0.0.0-20220711213114-2a14873012db // indirect
+
 require (
 	github.com/cilium/ebpf v0.9.1 // indirect
 	github.com/coreos/go-systemd/v22 v22.5.0 // indirect
