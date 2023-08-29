@@ -224,11 +224,14 @@ func (fs *Filesystem) WaitUntilReady(snapshotID string) error {
 // this method will fork nydus daemon and manage it in the internal store, and indexed by snapshotID
 // It must set up all necessary resources during Mount procedure and revoke any step if necessary.
 func (fs *Filesystem) Mount(snapshotID string, labels map[string]string, s *storage.Snapshot) (err error) {
+	//<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
 	// Do not create RAFS instance in case of nodev.
 	if !fs.DaemonBacked() {
 		return nil
 	}
+	//>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
 
+	//<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
 	fsDriver := config.GetFsDriver()
 	if label.IsTarfsDataLayer(labels) {
 		fsDriver = config.FsDriverBlockdev
@@ -370,6 +373,7 @@ func (fs *Filesystem) Mount(snapshotID string, labels map[string]string, s *stor
 	}
 
 	return nil
+	//>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
 }
 
 func (fs *Filesystem) Umount(ctx context.Context, snapshotID string) error {
@@ -625,6 +629,7 @@ func (fs *Filesystem) createDaemon(fsManager *manager.Manager, daemonMode config
 		return nil, errors.Wrapf(err, "new daemon")
 	}
 
+	//<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
 	if err = fsManager.NewDaemon(d); err != nil {
 		return nil, err
 	}
@@ -640,6 +645,7 @@ func (fs *Filesystem) createDaemon(fsManager *manager.Manager, daemonMode config
 	}
 
 	return d, nil
+	//>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
 }
 
 func (fs *Filesystem) DaemonBacked() bool {

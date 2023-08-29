@@ -336,6 +336,7 @@ func (o *snapshotter) Usage(ctx context.Context, key string) (snapshots.Usage, e
 		}
 		usage = snapshots.Usage(du)
 	case snapshots.KindCommitted:
+		//<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
 		// Caculate disk space usage under cacheDir of committed snapshots.
 		if label.IsNydusDataLayer(info.Labels) || label.IsTarfsDataLayer(info.Labels) {
 			if blobDigest, ok := info.Labels[snpkg.TargetLayerDigestLabel]; ok {
@@ -347,6 +348,7 @@ func (o *snapshotter) Usage(ctx context.Context, key string) (snapshots.Usage, e
 				usage.Add(cacheUsage)
 			}
 		}
+		//>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
 	case snapshots.KindUnknown:
 	case snapshots.KindView:
 	}
@@ -818,6 +820,7 @@ func overlayMount(options []string) []mount.Mount {
 // `s` is the upmost snapshot and `id` refers to the nydus meta snapshot
 // `s` and `id` can represent a different layer, it's useful when View an image
 func (o *snapshotter) remoteMounts(ctx context.Context, labels map[string]string, s storage.Snapshot, id string) ([]mount.Mount, error) {
+	//<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
 	var overlayOptions []string
 	if s.Kind == snapshots.KindActive {
 		overlayOptions = append(overlayOptions,
@@ -856,8 +859,10 @@ func (o *snapshotter) remoteMounts(ctx context.Context, labels map[string]string
 	}
 
 	return overlayMount(overlayOptions), nil
+	//>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
 }
 
+// <<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
 type ExtraOption struct {
 	Source      string `json:"source"`
 	Config      string `json:"config"`
@@ -933,6 +938,8 @@ func (o *snapshotter) remoteMountWithExtraOptions(ctx context.Context, s storage
 		},
 	}, nil
 }
+
+//>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
 
 func (o *snapshotter) mounts(ctx context.Context, labels map[string]string, s storage.Snapshot) ([]mount.Mount, error) {
 	if len(s.ParentIDs) == 0 {

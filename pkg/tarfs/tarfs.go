@@ -75,7 +75,6 @@ type Manager struct {
 type snapshotStatus struct {
 	mutex           sync.Mutex
 	status          int
-	hasDataBlob     bool
 	blobID          string
 	blobTarFilePath string
 	erofsMountPoint string
@@ -282,9 +281,9 @@ func (t *Manager) generateBootstrap(tarReader io.Reader, snapshotID, layerBlobID
 	return nil
 }
 
-func (t *Manager) checkTarfsHasDataBlob(metaFilePath string) (bool, error) {
+func (t *Manager) getImageBlobInfo(metaFilePath string) (string, error) {
 	if _, err := os.Stat(metaFilePath); err != nil {
-		return false, err
+		return "", err
 	}
 
 	options := []string{
@@ -300,15 +299,10 @@ func (t *Manager) checkTarfsHasDataBlob(metaFilePath string) (bool, error) {
 	err := cmd.Run()
 	if err != nil {
 		log.L.Warnf("nydus image exec failed, %s", errb.String())
-		return false, errors.Wrap(err, "converting OCIv1 layer blob to tarfs")
+		return "", errors.Wrap(err, "converting OCIv1 layer blob to tarfs")
 	}
 
-	out := string(outb.Bytes())
-	if strings.Contains(out, "\"blob_id\"") && strings.Contains(out, "\"compressed_size\"") {
-		return true, nil
-	}
-
-	return false, nil
+	return string(outb.Bytes()), nil
 }
 
 // download & uncompress an oci/docker blob, and then generate the tarfs bootstrap
@@ -388,12 +382,8 @@ func (t *Manager) PrepareLayer(snapshotID, ref string, manifestDigest, layerDige
 	go func() {
 		defer wg.Done()
 
-		hasDataBlob := false
 		layerBlobID := layerDigest.Hex()
 		err := t.blobProcess(ctx, snapshotID, ref, manifestDigest, layerDigest, layerBlobID, upperDirPath)
-		if err == nil {
-			hasDataBlob, err = t.checkTarfsHasDataBlob(t.layerMetaFilePath(upperDirPath))
-		}
 
 		st, err1 := t.getSnapshotStatus(snapshotID, true)
 		if err1 != nil {
@@ -406,14 +396,13 @@ func (t *Manager) PrepareLayer(snapshotID, ref string, manifestDigest, layerDige
 
 		st.blobID = layerBlobID
 		st.blobTarFilePath = t.layerTarFilePath(layerBlobID)
-		st.hasDataBlob = hasDataBlob
 		if err != nil {
 			log.L.WithError(err).Errorf("failed to convert OCI image to tarfs")
 			st.status = TarfsStatusFailed
 		} else {
 			st.status = TarfsStatusReady
 		}
-		log.L.Debugf("finish converting snapshot %s to tarfs, status %d, data blob %v", snapshotID, st.status, st.hasDataBlob)
+		log.L.Debugf("finish converting snapshot %s to tarfs, status %d", snapshotID, st.status)
 	}()
 
 	return nil
@@ -574,6 +563,13 @@ func (t *Manager) MountTarErofs(snapshotID string, s *storage.Snapshot, rafs *da
 		return errors.New("snapshot object for MountTarErofs() is nil")
 	}
 
+	upperDirPath := path.Join(rafs.GetSnapshotDir(), "fs")
+	mergedBootstrap := t.imageMetaFilePath(upperDirPath)
+	blobInfo, err := t.getImageBlobInfo(mergedBootstrap)
+	if err != nil {
+		return errors.Wrapf(err, "get image blob info")
+	}
+
 	var devices []string
 	// When merging bootstrap, we need to arrange layer bootstrap in order from low to high
 	for idx := len(s.ParentIDs) - 1; idx >= 0; idx-- {
@@ -592,7 +588,8 @@ func (t *Manager) MountTarErofs(snapshotID string, s *storage.Snapshot, rafs *da
 			return errors.Errorf("snapshot %s tarfs format error %d", snapshotID, st.status)
 		}
 
-		if st.hasDataBlob {
+		var blobMarker = "\"blob_id\":\"" + st.blobID + "\""
+		if strings.Contains(blobInfo, blobMarker) {
 			if st.dataLoopdev == nil {
 				loopdev, err := t.attachLoopdev(st.blobTarFilePath)
 				if err != nil {
@@ -624,8 +621,6 @@ func (t *Manager) MountTarErofs(snapshotID string, s *storage.Snapshot, rafs *da
 	}
 
 	if st.metaLoopdev == nil {
-		upperDirPath := path.Join(rafs.GetSnapshotDir(), "fs")
-		mergedBootstrap := t.imageMetaFilePath(upperDirPath)
 		loopdev, err := t.attachLoopdev(mergedBootstrap)
 		if err != nil {
 			return errors.Wrapf(err, "attach merged bootstrap %s to loopdev", mergedBootstrap)
