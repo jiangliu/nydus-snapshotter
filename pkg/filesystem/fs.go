@@ -270,6 +270,17 @@ func (fs *Filesystem) Mount(snapshotID string, labels map[string]string, s *stor
 		}
 	}()
 
+	bootstrap, err := rafs.BootstrapFile()
+	if err != nil {
+		return errors.Wrapf(err, "find bootstrap file snapshot %s", snapshotID)
+	}
+
+	// if publicKey is not empty we should verify bootstrap file of image
+	err = fs.verifier.Verify(labels, bootstrap)
+	if err != nil {
+		return errors.Wrapf(err, "verify signature of image %s", imageID)
+	}
+
 	fsManager, err := fs.getManager(fsDriver)
 	if err != nil {
 		return errors.Wrapf(err, "get filesystem manager for snapshot %s", snapshotID)
@@ -277,11 +288,6 @@ func (fs *Filesystem) Mount(snapshotID string, labels map[string]string, s *stor
 
 	var d *daemon.Daemon
 	if fsDriver == config.FsDriverFscache || fsDriver == config.FsDriverFusedev {
-		bootstrap, err := rafs.BootstrapFile()
-		if err != nil {
-			return errors.Wrapf(err, "find bootstrap file snapshot %s", snapshotID)
-		}
-
 		if useSharedDaemon {
 			d, err = fs.getSharedDaemon(fsDriver)
 			if err != nil {
@@ -340,12 +346,6 @@ func (fs *Filesystem) Mount(snapshotID string, labels map[string]string, s *stor
 		}
 
 		d.AddRafsInstance(rafs)
-
-		// if publicKey is not empty we should verify bootstrap file of image
-		err = fs.verifier.Verify(labels, bootstrap)
-		if err != nil {
-			return errors.Wrapf(err, "verify signature of daemon %s", d.ID())
-		}
 	}
 
 	switch fsDriver {
