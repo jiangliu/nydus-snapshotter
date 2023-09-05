@@ -558,12 +558,37 @@ func (t *Manager) ExportBlockData(s storage.Snapshot, perLayer bool, labels map[
 	return updateFields, nil
 }
 
-func (t *Manager) MountTarErofs(snapshotID string, s *storage.Snapshot, rafs *rafs.Rafs) error {
+func (t *Manager) MountTarErofs(snapshotID string, s *storage.Snapshot, labels map[string]string, rafs *rafs.Rafs) error {
 	if s == nil {
 		return errors.New("snapshot object for MountTarErofs() is nil")
 	}
 
+	// Copy meta info from snapshot to rafs
+	st, err := t.getSnapshotStatus(snapshotID, true)
+	if err != nil {
+		return err
+	}
+	if v, ok := labels[label.NydusTarfsLayer]; ok {
+		rafs.AddAnnotation(label.NydusTarfsLayer, v)
+		switch v {
+		case config.TarfsImageBlockDevice, config.TarfsImageBlockWithVerity:
+			rafs.AddAnnotation(label.NydusImageBlockFile, t.imageDiskFilePath(st.blobID))
+		}
+	}
+	if v, ok := labels[label.NydusImageBlockInfo]; ok {
+		rafs.AddAnnotation(label.NydusImageBlockInfo, v)
+	}
+	if v, ok := labels[label.NydusLayerBlockInfo]; ok {
+		rafs.AddAnnotation(label.NydusLayerBlockInfo, v)
+	}
+	st.mutex.Unlock()
+
 	upperDirPath := path.Join(rafs.GetSnapshotDir(), "fs")
+	if !config.GetTarfsMountOnHost() {
+		rafs.SetMountpoint(upperDirPath)
+		return nil
+	}
+
 	mergedBootstrap := t.imageMetaFilePath(upperDirPath)
 	blobInfo, err := t.getImageBlobInfo(mergedBootstrap)
 	if err != nil {
@@ -605,7 +630,7 @@ func (t *Manager) MountTarErofs(snapshotID string, s *storage.Snapshot, rafs *ra
 	}
 	mountOpts := strings.Join(devices, ",")
 
-	st, err := t.getSnapshotStatus(snapshotID, true)
+	st, err = t.getSnapshotStatus(snapshotID, true)
 	if err != nil {
 		return err
 	}
@@ -654,8 +679,9 @@ func (t *Manager) UmountTarErofs(snapshotID string) error {
 		if err != nil {
 			return errors.Wrapf(err, "umount erofs tarfs %s", st.erofsMountPoint)
 		}
+		st.erofsMountPoint = ""
 	}
-	st.erofsMountPoint = ""
+
 	return nil
 }
 
@@ -671,6 +697,7 @@ func (t *Manager) DetachLayer(snapshotID string) error {
 			st.mutex.Unlock()
 			return errors.Wrapf(err, "umount erofs tarfs %s", st.erofsMountPoint)
 		}
+		st.erofsMountPoint = ""
 	}
 
 	if st.metaLoopdev != nil {

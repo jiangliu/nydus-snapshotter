@@ -18,7 +18,9 @@ import (
 	"github.com/containerd/containerd/log"
 	"github.com/containerd/containerd/mount"
 	"github.com/containerd/containerd/snapshots/storage"
+	"github.com/containerd/nydus-snapshotter/config"
 	"github.com/containerd/nydus-snapshotter/config/daemonconfig"
+	"github.com/containerd/nydus-snapshotter/pkg/label"
 	"github.com/containerd/nydus-snapshotter/pkg/layout"
 	"github.com/containerd/nydus-snapshotter/pkg/rafs"
 	"github.com/pkg/errors"
@@ -98,6 +100,106 @@ func (o *snapshotter) remoteMountWithExtraOptions(ctx context.Context, s storage
 			Options: overlayOptions,
 		},
 	}, nil
+}
+
+func (o *snapshotter) mountWithKataVolume(ctx context.Context, s storage.Snapshot, id string, overlayOptions []string) ([]mount.Mount, error) {
+	hasVolume := false
+	rafs := rafs.RafsGlobalCache.Get(id)
+	if rafs == nil {
+		return []mount.Mount{}, errors.Errorf("failed to find RAFS instance for snapshot %s", id)
+	}
+
+	// Insert Kata volume for tarfs
+	if v, ok := rafs.Annotations[label.NydusTarfsLayer]; ok {
+		options, err := o.mountWithTarfsVolume(*rafs, v, id)
+		if err != nil {
+			return []mount.Mount{}, errors.Wrapf(err, "create kata volume for tarfs")
+		}
+		if len(options) > 0 {
+			overlayOptions = append(overlayOptions, options...)
+			hasVolume = true
+		}
+	}
+
+	if hasVolume {
+		log.G(ctx).Debugf("fuse.nydus-overlayfs mount options %v", overlayOptions)
+		return []mount.Mount{
+			{
+				Type:    "fuse.nydus-overlayfs",
+				Source:  "overlay",
+				Options: overlayOptions,
+			},
+		}, nil
+	}
+
+	return overlayMount(overlayOptions), nil
+}
+
+func (o *snapshotter) mountWithTarfsVolume(rafs rafs.Rafs, mode, id string) ([]string, error) {
+	var volume *KataVirtualVolume
+
+	switch mode {
+	//case TarfsLayerVerityOnly, TarfsImageVerityOnly, config.TarfsLayerBlockDevice, config.TarfsLayerBlockWithVerity:
+	case config.TarfsImageBlockDevice, config.TarfsImageBlockWithVerity:
+		path, ok := rafs.Annotations[label.NydusImageBlockFile]
+		if !ok {
+			return []string{}, errors.Errorf("missing block file path for RAFS instance for snapshot %s", id)
+		}
+		volume = &KataVirtualVolume{
+			VolumeType: KataVirtualVolumeImageRawBlockType,
+			Source:     path,
+			FSType:     "erofs",
+			Options:    []string{"ro"},
+		}
+		if mode == config.TarfsImageBlockWithVerity {
+			info, ok := rafs.Annotations[label.NydusImageBlockInfo]
+			if !ok {
+				return []string{}, errors.Errorf("missing block dm-verity information for snapshot %s", id)
+			}
+			dmverity, err := parseTarfsDmVerityInfo(info)
+			if err != nil {
+				return []string{}, err
+			}
+			volume.DmVerity = &dmverity
+		}
+	}
+
+	if volume != nil {
+		if !volume.IsValid() {
+			return []string{}, errors.Errorf("got invalid kata volume, %v", volume)
+		}
+		info, err := EncodeKataVirtualVolumeToBase64(*volume)
+		if err != nil {
+			return []string{}, errors.Errorf("failed to encoding Kata Volume info %v", volume)
+		}
+		opt := fmt.Sprintf("%s=%s", KataVirtualVolumeOptionName, info)
+		return []string{opt}, nil
+	}
+
+	return []string{}, nil
+}
+
+func parseTarfsDmVerityInfo(info string) (DmVerityInfo, error) {
+	var dataBlocks, hashOffset uint64
+	var rootHash string
+
+	pattern := "%d,%d,sha256:%s"
+	if count, err := fmt.Sscanf(info, pattern, &dataBlocks, &hashOffset, &rootHash); err == nil && count == 3 {
+		di := DmVerityInfo{
+			HashType:  "sha256",
+			Hash:      rootHash,
+			BlockNum:  dataBlocks,
+			Blocksize: 512,
+			Hashsize:  4096,
+			Offset:    hashOffset,
+		}
+		if err := di.IsValid(); err != nil {
+			return DmVerityInfo{}, errors.Wrap(err, "validate dm-verity information")
+		}
+		return di, nil
+	}
+
+	return DmVerityInfo{}, errors.Errorf("invalid dm-verity information: %s", info)
 }
 
 // Consts and data structures for Kata Virtual Volume

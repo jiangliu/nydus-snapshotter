@@ -34,7 +34,7 @@ const (
 	NydusMetaLayer = "containerd.io/snapshot/nydus-bootstrap"
 	// The referenced blob sha256 in format of `sha256:xxx`, set by image builders.
 	NydusRefLayer = "containerd.io/snapshot/nydus-ref"
-	// A bool flag to mark the layer as a nydus tarfs, set by the snapshotter
+	// Tarfs export mode, aslo working as a marker, set by the snapshotter
 	NydusTarfsLayer = "containerd.io/snapshot/nydus-tarfs"
 	// Annotation containing secret to pull images from registry, set by the snapshotter.
 	NydusImagePullSecret = "containerd.io/snapshot/pullsecret"
@@ -42,10 +42,14 @@ const (
 	NydusImagePullUsername = "containerd.io/snapshot/pullusername"
 	// A bool flag to enable integrity verification of meta data blob
 	NydusSignature = "containerd.io/snapshot/nydus-signature"
-	// Information for image block device
+	// Dm-verity information for image block device
 	NydusImageBlockInfo = "containerd.io/snapshot/nydus-image-block"
-	// Information for layer block device
+	// Dm-verity information for layer block device
 	NydusLayerBlockInfo = "containerd.io/snapshot/nydus-layer-block"
+	// Path for image block file
+	NydusImageBlockFile = "containerd.io/snapshot/nydus-image-file"
+	// Path for layer block file
+	NydusLayerBlockFile = "containerd.io/snapshot/nydus-layer-file"
 
 	// A bool flag to mark the blob as a estargz data blob, set by the snapshotter.
 	StargzLayer = "containerd.io/snapshot/stargz"

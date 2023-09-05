@@ -121,6 +121,14 @@ const (
 	TarfsImageBlockWithVerity string = "image_block_with_verity"
 )
 
+func GetTarfsMountOnHost() bool {
+	return globalConfig.origin.Experimental.TarfsConfig.MountTarfsOnHost
+}
+
+func GetTarfsExportMode() string {
+	return globalConfig.origin.Experimental.TarfsConfig.ExportMode
+}
+
 func GetTarfsExportEnabled() bool {
 	switch globalConfig.origin.Experimental.TarfsConfig.ExportMode {
 	case TarfsLayerVerityOnly, TarfsLayerBlockDevice, TarfsLayerBlockWithVerity:
