@@ -520,7 +520,7 @@ func (t *Manager) ExportBlockData(s storage.Snapshot, perLayer bool, labels map[
 	if withVerity {
 		options = append(options, "--verity")
 	}
-	log.L.Warnf("nydus image command %v", options)
+	log.L.Debugf("nydus image command %v", options)
 	cmd := exec.Command(t.nydusImagePath, options...)
 	var errb, outb bytes.Buffer
 	cmd.Stderr = &errb
@@ -547,7 +547,6 @@ func (t *Manager) ExportBlockData(s storage.Snapshot, perLayer bool, labels map[
 			labels[label.NydusLayerBlockInfo] = blockInfo
 			updateFields = append(updateFields, "labels."+label.NydusLayerBlockInfo)
 		}
-		log.L.Warnf("export block labels %v", labels)
 	}
 
 	err = os.Rename(diskFileNameTmp, diskFileName)

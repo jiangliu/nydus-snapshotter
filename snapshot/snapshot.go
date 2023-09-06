@@ -66,11 +66,6 @@ func NewSnapshotter(ctx context.Context, cfg *config.SnapshotterConfig) (snapsho
 		return nil, errors.Wrap(err, "initialize image verifier")
 	}
 
-	daemonConfig, err := daemonconfig.NewDaemonConfig(config.GetFsDriver(), cfg.DaemonConfig.NydusdConfigPath)
-	if err != nil {
-		return nil, errors.Wrap(err, "load daemon configuration")
-	}
-
 	db, err := store.NewDatabase(cfg.Root)
 	if err != nil {
 		return nil, errors.Wrap(err, "create database")
@@ -98,6 +93,22 @@ func NewSnapshotter(ctx context.Context, cfg *config.SnapshotterConfig) (snapsho
 		}
 	}
 
+	var skipSSLVerify bool
+	var daemonConfig *daemonconfig.DaemonConfig
+	fsDriver := config.GetFsDriver()
+	if fsDriver == config.FsDriverFscache || fsDriver == config.FsDriverFusedev {
+		config, err := daemonconfig.NewDaemonConfig(config.GetFsDriver(), cfg.DaemonConfig.NydusdConfigPath)
+		if err != nil {
+			return nil, errors.Wrap(err, "load daemon configuration")
+		}
+		daemonConfig = &config
+		_, backendConfig := config.StorageBackend()
+		skipSSLVerify = backendConfig.SkipVerify
+	} else {
+		// TODO: config skipSSLKVerify for tarfs etc
+		skipSSLVerify = true
+	}
+
 	var blockdevManager *mgr.Manager
 	if cfg.Experimental.TarfsConfig.EnableTarfs {
 		blockdevManager, err = mgr.NewManager(mgr.Opt{
@@ -107,7 +118,7 @@ func NewSnapshotter(ctx context.Context, cfg *config.SnapshotterConfig) (snapsho
 			RootDir:          cfg.Root,
 			RecoverPolicy:    rp,
 			FsDriver:         config.FsDriverBlockdev,
-			DaemonConfig:     daemonConfig,
+			DaemonConfig:     nil,
 			CgroupMgr:        cgroupMgr,
 		})
 		if err != nil {
@@ -199,16 +210,12 @@ func NewSnapshotter(ctx context.Context, cfg *config.SnapshotterConfig) (snapsho
 	}
 
 	if cfg.Experimental.EnableReferrerDetect {
-		// FIXME: get the insecure option from nydusd config.
-		_, backendConfig := daemonConfig.StorageBackend()
-		referrerMgr := referrer.NewManager(backendConfig.SkipVerify)
+		referrerMgr := referrer.NewManager(skipSSLVerify)
 		opts = append(opts, filesystem.WithReferrerManager(referrerMgr))
 	}
 
 	if cfg.Experimental.TarfsConfig.EnableTarfs {
-		// FIXME: get the insecure option from nydusd config.
-		_, backendConfig := daemonConfig.StorageBackend()
-		tarfsMgr := tarfs.NewManager(backendConfig.SkipVerify, cfg.Experimental.TarfsConfig.TarfsHint,
+		tarfsMgr := tarfs.NewManager(skipSSLVerify, cfg.Experimental.TarfsConfig.TarfsHint,
 			cacheConfig.CacheDir, cfg.DaemonConfig.NydusImagePath,
 			int64(cfg.Experimental.TarfsConfig.MaxConcurrentProc))
 		opts = append(opts, filesystem.WithTarfsManager(tarfsMgr))
