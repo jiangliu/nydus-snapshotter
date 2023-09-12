@@ -76,7 +76,6 @@ type snapshotStatus struct {
 	mutex           sync.Mutex
 	status          int
 	blobID          string
-	blobTarFilePath string
 	erofsMountPoint string
 	dataLoopdev     *losetup.Device
 	metaLoopdev     *losetup.Device
@@ -320,7 +319,6 @@ func (t *Manager) blobProcess(ctx context.Context, wg *sync.WaitGroup, snapshotI
 		defer st.mutex.Unlock()
 
 		st.blobID = layerBlobID
-		st.blobTarFilePath = t.layerTarFilePath(layerBlobID)
 		if err != nil {
 			log.L.WithError(err).Errorf(msg)
 			st.status = TarfsStatusFailed
@@ -604,10 +602,11 @@ func (t *Manager) MountTarErofs(snapshotID string, s *storage.Snapshot, labels m
 		var blobMarker = "\"blob_id\":\"" + st.blobID + "\""
 		if strings.Contains(blobInfo, blobMarker) {
 			if st.dataLoopdev == nil {
-				loopdev, err := t.attachLoopdev(st.blobTarFilePath)
+				blobTarFilePath := t.layerTarFilePath(st.blobID)
+				loopdev, err := t.attachLoopdev(blobTarFilePath)
 				if err != nil {
 					st.mutex.Unlock()
-					return errors.Wrapf(err, "attach layer tar file %s to loopdev", st.blobTarFilePath)
+					return errors.Wrapf(err, "attach layer tar file %s to loopdev", blobTarFilePath)
 				}
 				st.dataLoopdev = loopdev
 			}
