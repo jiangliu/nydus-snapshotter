@@ -33,6 +33,7 @@ import (
 	"github.com/containerd/nydus-snapshotter/pkg/remote"
 	"github.com/containerd/nydus-snapshotter/pkg/remote/remotes"
 	losetup "github.com/freddierice/go-losetup"
+	"github.com/moby/sys/mountinfo"
 	"github.com/opencontainers/go-digest"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 	"github.com/pkg/errors"
@@ -81,6 +82,7 @@ type snapshotStatus struct {
 	metaLoopdev     *losetup.Device
 	wg              *sync.WaitGroup
 	cancel          context.CancelFunc
+	ctx             context.Context
 }
 
 func NewManager(insecure, checkTarfsHint bool, cacheDirPath, nydusImagePath string, maxConcurrentProcess int64) *Manager {
@@ -412,6 +414,7 @@ func (t *Manager) retryPrepareLayer(snapshotID, upperDirPath string, labels map[
 	if err != nil {
 		return errors.Wrapf(err, "retry downloading content for snapshot %s", snapshotID)
 	}
+	ctx := st.ctx
 	switch st.status {
 	case TarfsStatusPrepare:
 		log.L.Infof("Another thread is retrying snapshot %s, wait for the result", snapshotID)
@@ -432,7 +435,6 @@ func (t *Manager) retryPrepareLayer(snapshotID, upperDirPath string, labels map[
 		st.mutex.Unlock()
 	}
 
-	ctx := context.Background()
 	if err := t.blobProcess(ctx, snapshotID, ref, manifestDigest, layerDigest, upperDirPath, true); err != nil {
 		log.L.WithError(err).Errorf("async prepare tarfs layer of snapshot ID %s", snapshotID)
 	}
@@ -454,6 +456,7 @@ func (t *Manager) PrepareLayer(snapshotID, ref string, manifestDigest, layerDige
 		status: TarfsStatusPrepare,
 		wg:     wg,
 		cancel: cancel,
+		ctx:    ctx,
 	}
 	t.mutex.Unlock()
 
@@ -762,6 +765,48 @@ func (t *Manager) DetachLayer(snapshotID string) error {
 	t.mutex.Lock()
 	delete(t.snapshotMap, snapshotID)
 	t.mutex.Unlock()
+	return nil
+}
+
+func (t *Manager) RecoverRafsInstance(r *rafs.Rafs) error {
+	t.mutex.Lock()
+	defer t.mutex.Unlock()
+
+	if _, ok := t.snapshotMap[r.SnapshotID]; ok {
+		return errors.Errorf("snapshot %s already exists", r.SnapshotID)
+	}
+
+	blobID, ok := r.Annotations[label.CRILayerDigest]
+	if !ok {
+		return errors.Errorf("no layer digest for snapshot %s", r.SnapshotID)
+	}
+
+	status := TarfsStatusFailed
+	upperDir := path.Join(r.GetSnapshotDir(), "fs")
+	metaFilePath := t.layerMetaFilePath(upperDir)
+	ctx, cancel := context.WithCancel(context.Background())
+	wg := &sync.WaitGroup{}
+	wg.Add(1)
+
+	var mountPoint string
+	if _, err := os.Stat(metaFilePath); err == nil {
+		status = TarfsStatusReady
+		mountPoint = path.Join(r.GetSnapshotDir(), "mnt")
+		mounted, err := mountinfo.Mounted(mountPoint)
+		if !mounted || err != nil {
+			mountPoint = ""
+		}
+	}
+
+	t.snapshotMap[r.SnapshotID] = &snapshotStatus{
+		status:          status,
+		blobID:          blobID,
+		erofsMountPoint: mountPoint,
+		wg:              wg,
+		cancel:          cancel,
+		ctx:             ctx,
+	}
+
 	return nil
 }
 
