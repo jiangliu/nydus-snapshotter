@@ -34,6 +34,7 @@ import (
 	"github.com/containerd/nydus-snapshotter/pkg/metrics"
 	"github.com/containerd/nydus-snapshotter/pkg/metrics/collector"
 	"github.com/containerd/nydus-snapshotter/pkg/pprof"
+	"github.com/containerd/nydus-snapshotter/pkg/rafs"
 	"github.com/containerd/nydus-snapshotter/pkg/referrer"
 	"github.com/containerd/nydus-snapshotter/pkg/system"
 	"github.com/containerd/nydus-snapshotter/pkg/tarfs"
@@ -224,8 +225,9 @@ func NewSnapshotter(ctx context.Context, cfg *config.SnapshotterConfig) (snapsho
 		opts = append(opts, filesystem.WithReferrerManager(referrerMgr))
 	}
 
+	var tarfsMgr *tarfs.Manager
 	if cfg.Experimental.TarfsConfig.EnableTarfs {
-		tarfsMgr := tarfs.NewManager(skipSSLVerify, cfg.Experimental.TarfsConfig.TarfsHint,
+		tarfsMgr = tarfs.NewManager(skipSSLVerify, cfg.Experimental.TarfsConfig.TarfsHint,
 			cacheConfig.CacheDir, cfg.DaemonConfig.NydusImagePath,
 			int64(cfg.Experimental.TarfsConfig.MaxConcurrentProc))
 		opts = append(opts, filesystem.WithTarfsManager(tarfsMgr))
@@ -283,7 +285,7 @@ func NewSnapshotter(ctx context.Context, cfg *config.SnapshotterConfig) (snapsho
 		syncRemove = true
 	}
 
-	return &snapshotter{
+	snapshotter := &snapshotter{
 		root:                 cfg.Root,
 		nydusdPath:           cfg.DaemonConfig.NydusdPath,
 		ms:                   ms,
@@ -293,7 +295,43 @@ func NewSnapshotter(ctx context.Context, cfg *config.SnapshotterConfig) (snapsho
 		enableNydusOverlayFS: cfg.SnapshotsConfig.EnableNydusOverlayFS,
 		enableKataVolume:     cfg.SnapshotsConfig.EnableKataVolume,
 		cleanupOnClose:       cfg.CleanupOnClose,
-	}, nil
+	}
+
+	// There's special requirement to recover tarfs instance because it depdens on `snapshotter.ms`
+	// so it can't be done in `Filesystem.Recover()`
+	if tarfsMgr != nil {
+		if err := snapshotter.recoverTarfs(ctx, tarfsMgr); err != nil {
+			return nil, errors.Wrapf(err, "recover tarfs instances")
+		}
+	}
+
+	return snapshotter, nil
+}
+
+func (o *snapshotter) recoverTarfs(ctx context.Context, tarfsMgr *tarfs.Manager) error {
+	// First recover all snapshot information related to tarfs, mount operation depends on snapshots.
+	o.Walk(ctx, func(ctx context.Context, i snapshots.Info) error {
+		if _, ok := i.Labels[label.NydusTarfsLayer]; ok {
+			id, _, _, err := snapshot.GetSnapshotInfo(ctx, o.ms, i.Name)
+			if err != nil {
+				return errors.Wrapf(err, "get id for snapshot %s", i.Name)
+			}
+			log.L.Infof("found tarfs snapshot %s with name %s", id, i.Name)
+			upperPath := o.upperPath(id)
+			if err = tarfsMgr.RecoverSnapshoInfo(ctx, id, i, upperPath); err != nil {
+				return errors.Wrapf(err, "get id for snapshot %s", i.Name)
+			}
+		}
+		return nil
+	})
+
+	for id, r := range tarfsMgr.RemountMap {
+		log.L.Infof("remount tarfs snapshot %s", id)
+		tarfsMgr.RemountErofs(id, r)
+	}
+	tarfsMgr.RemountMap = map[string]*rafs.Rafs{}
+
+	return nil
 }
 
 func (o *snapshotter) Cleanup(ctx context.Context) error {

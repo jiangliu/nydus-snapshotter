@@ -57,6 +57,7 @@ const (
 )
 
 type Manager struct {
+	RemountMap           map[string]*rafs.Rafs      // Scratch space to store rafs instances needing remount on startup
 	snapshotMap          map[string]*snapshotStatus // tarfs snapshots status, indexed by snapshot ID
 	mutex                sync.Mutex
 	mutexLoopDev         sync.Mutex
@@ -87,6 +88,7 @@ type snapshotStatus struct {
 func NewManager(insecure, checkTarfsHint bool, cacheDirPath, nydusImagePath string, maxConcurrentProcess int64) *Manager {
 	return &Manager{
 		snapshotMap:          map[string]*snapshotStatus{},
+		RemountMap:           map[string]*rafs.Rafs{},
 		cacheDirPath:         cacheDirPath,
 		nydusImagePath:       nydusImagePath,
 		insecure:             insecure,
@@ -622,7 +624,7 @@ func (t *Manager) ExportBlockData(s storage.Snapshot, perLayer bool, labels map[
 	return updateFields, nil
 }
 
-func (t *Manager) MountTarErofs(snapshotID string, s *storage.Snapshot, labels map[string]string, rafs *rafs.Rafs) error {
+func (t *Manager) MountErofs(snapshotID string, s *storage.Snapshot, labels map[string]string, rafs *rafs.Rafs) error {
 	if s == nil {
 		return errors.New("snapshot object for MountTarErofs() is nil")
 	}
@@ -643,6 +645,7 @@ func (t *Manager) MountTarErofs(snapshotID string, s *storage.Snapshot, labels m
 	}
 
 	var devices []string
+	var parents []string
 	// When merging bootstrap, we need to arrange layer bootstrap in order from low to high
 	for idx := len(s.ParentIDs) - 1; idx >= 0; idx-- {
 		snapshotID := s.ParentIDs[idx]
@@ -663,10 +666,13 @@ func (t *Manager) MountTarErofs(snapshotID string, s *storage.Snapshot, labels m
 				st.dataLoopdev = loopdev
 			}
 			devices = append(devices, "device="+st.dataLoopdev.Name())
+			parents = append(parents, snapshotID)
 		}
 
 		st.mutex.Unlock()
 	}
+	parentList := strings.Join(parents, ",")
+	devices = append(devices, "ro")
 	mountOpts := strings.Join(devices, ",")
 
 	st, err := t.getSnapshotStatus(snapshotID, true)
@@ -685,6 +691,84 @@ func (t *Manager) MountTarErofs(snapshotID string, s *storage.Snapshot, labels m
 	}
 
 	if st.metaLoopdev == nil {
+		loopdev, err := t.attachLoopdev(mergedBootstrap)
+		if err != nil {
+			return errors.Wrapf(err, "attach merged bootstrap %s to loopdev", mergedBootstrap)
+		}
+		st.metaLoopdev = loopdev
+	}
+	devName := st.metaLoopdev.Name()
+
+	if err = os.MkdirAll(mountPoint, 0750); err != nil {
+		return errors.Wrapf(err, "create tarfs mount dir %s", mountPoint)
+	}
+
+	err = unix.Mount(devName, mountPoint, "erofs", 0, mountOpts)
+	if err != nil {
+		return errors.Wrapf(err, "mount erofs at %s with opts %s", mountPoint, mountOpts)
+	}
+	st.erofsMountPoint = mountPoint
+	rafs.SetMountpoint(mountPoint)
+	rafs.AddAnnotation(label.NydusTarfsParents, parentList)
+	return nil
+}
+
+func (t *Manager) RemountErofs(snapshotID string, rafs *rafs.Rafs) error {
+	upperDirPath := path.Join(rafs.GetSnapshotDir(), "fs")
+	if !config.GetTarfsMountOnHost() {
+		rafs.SetMountpoint(upperDirPath)
+		return nil
+	}
+
+	log.L.Infof("remount EROFS for tarfs snapshot %s at %s", snapshotID, upperDirPath)
+	var parents []string
+	if parentList, ok := rafs.Annotations[label.NydusTarfsParents]; ok {
+		parents = strings.Split(parentList, ",")
+	} else {
+		return nil
+	}
+
+	var devices []string
+	for idx := 0; idx < len(parents); idx++ {
+		snapshotID := parents[idx]
+		st, err := t.waitLayerReady(snapshotID, true)
+		if err != nil {
+			return errors.Wrapf(err, "wait for tarfs conversion task")
+		}
+
+		if st.dataLoopdev == nil {
+			blobTarFilePath := t.layerTarFilePath(st.blobID)
+			loopdev, err := t.attachLoopdev(blobTarFilePath)
+			if err != nil {
+				st.mutex.Unlock()
+				return errors.Wrapf(err, "attach layer tar file %s to loopdev", blobTarFilePath)
+			}
+			st.dataLoopdev = loopdev
+		}
+		devices = append(devices, "device="+st.dataLoopdev.Name())
+
+		st.mutex.Unlock()
+	}
+	devices = append(devices, "ro")
+	mountOpts := strings.Join(devices, ",")
+
+	st, err := t.getSnapshotStatus(snapshotID, true)
+	if err != nil {
+		return err
+	}
+	defer st.mutex.Unlock()
+
+	mountPoint := path.Join(rafs.GetSnapshotDir(), "mnt")
+	if len(st.erofsMountPoint) > 0 {
+		if st.erofsMountPoint == mountPoint {
+			log.L.Debugf("tarfs for snapshot %s has already been mounted at %s", snapshotID, mountPoint)
+			return nil
+		}
+		return errors.Errorf("tarfs for snapshot %s has already been mounted at %s", snapshotID, st.erofsMountPoint)
+	}
+
+	if st.metaLoopdev == nil {
+		mergedBootstrap := t.imageMetaFilePath(upperDirPath)
 		loopdev, err := t.attachLoopdev(mergedBootstrap)
 		if err != nil {
 			return errors.Wrapf(err, "attach merged bootstrap %s to loopdev", mergedBootstrap)
@@ -767,43 +851,88 @@ func (t *Manager) DetachLayer(snapshotID string) error {
 	return nil
 }
 
+func (t *Manager) RecoverSnapshoInfo(ctx context.Context, id string, info snapshots.Info, upperPath string) error {
+	t.mutex.Lock()
+	defer t.mutex.Unlock()
+	log.L.Infof("recover tarfs snapshot %s with path %s", id, upperPath)
+
+	if _, ok := t.snapshotMap[id]; ok {
+		// RecoverSnapshotInfo() is called after RecoverRafsInstance(), so there may be some snapshots already exist.
+		return nil
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	layerMetaFilePath := t.layerMetaFilePath(upperPath)
+	if _, err := os.Stat(layerMetaFilePath); err == nil {
+		layerDigest := digest.Digest(info.Labels[label.CRILayerDigest])
+		if layerDigest.Validate() != nil {
+			return errors.Errorf("not found layer digest label")
+		}
+		t.snapshotMap[id] = &snapshotStatus{
+			status: TarfsStatusReady,
+			blobID: layerDigest.Hex(),
+			cancel: cancel,
+			ctx:    ctx,
+		}
+	} else {
+		wg := &sync.WaitGroup{}
+		wg.Add(1)
+		t.snapshotMap[id] = &snapshotStatus{
+			status: TarfsStatusFailed,
+			wg:     wg,
+			cancel: cancel,
+			ctx:    ctx,
+		}
+	}
+	return nil
+}
+
+// This method is called in single threaded mode during startup, so we do not lock `snapshotStatus` objects.
 func (t *Manager) RecoverRafsInstance(r *rafs.Rafs) error {
 	t.mutex.Lock()
 	defer t.mutex.Unlock()
+	log.L.Infof("recover rafs instance %s for tarfs", r.SnapshotID)
 
 	if _, ok := t.snapshotMap[r.SnapshotID]; ok {
 		return errors.Errorf("snapshot %s already exists", r.SnapshotID)
 	}
 
-	blobID, ok := r.Annotations[label.CRILayerDigest]
-	if !ok {
-		return errors.Errorf("no layer digest for snapshot %s", r.SnapshotID)
+	layerDigest := digest.Digest(r.Annotations[label.CRILayerDigest])
+	if layerDigest.Validate() != nil {
+		return errors.Errorf("invalid layer digest for snapshot %s", r.SnapshotID)
 	}
 
-	status := TarfsStatusFailed
+	ctx, cancel := context.WithCancel(context.Background())
 	upperDir := path.Join(r.GetSnapshotDir(), "fs")
 	metaFilePath := t.layerMetaFilePath(upperDir)
-	ctx, cancel := context.WithCancel(context.Background())
-	wg := &sync.WaitGroup{}
-	wg.Add(1)
 
-	var mountPoint string
 	if _, err := os.Stat(metaFilePath); err == nil {
-		status = TarfsStatusReady
-		mountPoint = path.Join(r.GetSnapshotDir(), "mnt")
+		mountPoint := path.Join(r.GetSnapshotDir(), "mnt")
 		mounted, err := mountinfo.Mounted(mountPoint)
 		if !mounted || err != nil {
 			mountPoint = ""
 		}
-	}
-
-	t.snapshotMap[r.SnapshotID] = &snapshotStatus{
-		status:          status,
-		blobID:          blobID,
-		erofsMountPoint: mountPoint,
-		wg:              wg,
-		cancel:          cancel,
-		ctx:             ctx,
+		if !mounted && err == nil {
+			if _, ok := r.Annotations[label.NydusTarfsParents]; ok {
+				t.RemountMap[r.SnapshotID] = r
+			}
+		}
+		t.snapshotMap[r.SnapshotID] = &snapshotStatus{
+			status:          TarfsStatusReady,
+			blobID:          layerDigest.Hex(),
+			erofsMountPoint: mountPoint,
+			cancel:          cancel,
+			ctx:             ctx,
+		}
+	} else {
+		wg := &sync.WaitGroup{}
+		wg.Add(1)
+		t.snapshotMap[r.SnapshotID] = &snapshotStatus{
+			status: TarfsStatusFailed,
+			wg:     wg,
+			cancel: cancel,
+			ctx:    ctx,
+		}
 	}
 
 	return nil
